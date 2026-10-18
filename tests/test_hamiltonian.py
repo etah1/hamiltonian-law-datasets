@@ -45,6 +45,35 @@ def test_xy_chain_limits():
     assert solve_exact(build_hamiltonian("xy_chain", 2, Jx=0.0, Jy=0.0, h=1.0)).energy == pytest.approx(-2.0)
 
 
+def _coeff(op, label):
+    """Coefficient of a Pauli label (Qiskit order: qubit 0 is the rightmost char)."""
+    return dict(zip(op.paulis.to_labels(), op.coeffs))[label].real
+
+
+def test_lr_ising_term_counts():
+    # One ZZ per pair (n choose 2) plus one X per site.
+    n = 5
+    assert len(build_hamiltonian("lr_ising", n)) == n * (n - 1) // 2 + n
+
+
+def test_lr_ising_power_law_coefficients():
+    # Pairs (0,1), (0,2), (0,3) cover every distance on 4 sites; J0 != 1 so a
+    # missing prefactor would show up.
+    op = build_hamiltonian("lr_ising", 4, J0=2.0, alpha=1.3, h=0.5)
+    assert _coeff(op, "IIZZ") == pytest.approx(2.0)                 # |i-j| = 1
+    assert _coeff(op, "IZIZ") == pytest.approx(2.0 * 2 ** -1.3)     # |i-j| = 2
+    assert _coeff(op, "ZIIZ") == pytest.approx(2.0 * 3 ** -1.3)     # |i-j| = 3
+    assert _coeff(op, "IIIX") == pytest.approx(0.5)
+
+
+def test_lr_ising_large_alpha_is_nearest_neighbour():
+    # alpha -> large kills everything beyond nearest neighbours (2^-60 ~ 1e-18).
+    # tfim is -J ZZ - h X while lr_ising is +J0 ZZ + h X, so flip the signs to match.
+    lr =solve_exact(build_hamiltonian("lr_ising", 4, J0=-0.8, alpha=60.0, h=-1.1)).energy
+    nn = solve_exact(build_hamiltonian("tfim", 4, J=0.8, h=1.1)).energy
+    assert lr == pytest.approx(nn)
+
+
 @pytest.mark.parametrize("model", sorted(MODELS))
 def test_hermitian(model):
     m = build_hamiltonian(model, 3).to_matrix()
