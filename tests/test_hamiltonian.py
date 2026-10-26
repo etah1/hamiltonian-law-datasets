@@ -1,14 +1,16 @@
 import numpy as np
 import pytest
+from qiskit.quantum_info import Statevector
 
 from src.hamiltonian import (
     MODELS,
     bonds,
     build_hamiltonian,
     build_observables,
+    build_site_observables,
     model_defaults,
 )
-from src.solvers import solve_exact
+from src.solvers import expectation, solve_exact
 
 
 def test_bonds():
@@ -96,3 +98,35 @@ def test_defaults_are_copies():
 def test_observables():
     obs = build_observables(4)
     assert set(obs) == {"mx", "my", "mz", "xx", "yy", "zz"}
+
+
+def test_site_observables_count_and_keys():
+    # 3 single-site Paulis per site plus 3 two-site Paulis per pair i < j.
+    n = 4
+    obs = build_site_observables(n)
+    assert len(obs) == 3 * n + 3 * n * (n - 1) // 2
+    assert {"x_0", "y_3", "z_2", "xx_0_1", "yy_1_3", "zz_0_3"} <= set(obs)
+    assert "zz_1_0" not in obs  # each pair appears once, as i < j
+
+
+def test_site_observables_act_on_the_right_qubits():
+    # Qiskit labels put qubit 0 rightmost, so "IZII" is Z on qubit 2.
+    obs = build_site_observables(4)
+    assert obs["z_2"].paulis.to_labels() == ["IZII"]
+    assert obs["xx_0_3"].paulis.to_labels() == ["XIIX"]
+
+
+def test_site_observables_resolve_individual_sites():
+    # "1000" flips only qubit 3, so only terms touching qubit 3 change sign.
+    # An average like mz would hide which site flipped; these must not.
+    obs = build_site_observables(4)
+    state = Statevector.from_label("1000")
+    assert [expectation(state, obs[f"z_{k}"]) for k in range(4)] == pytest.approx([1, 1, 1, -1])
+    assert expectation(state, obs["zz_0_3"]) == pytest.approx(-1.0)
+    assert expectation(state, obs["zz_0_1"]) == pytest.approx(1.0)
+    assert expectation(state, obs["x_0"]) == pytest.approx(0.0)
+
+
+def test_site_observables_need_two_qubits():
+    with pytest.raises(ValueError):
+        build_site_observables(1)

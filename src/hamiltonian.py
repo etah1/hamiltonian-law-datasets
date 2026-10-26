@@ -155,3 +155,25 @@ def build_observables(n: int, periodic: bool = False) -> dict[str, SparsePauliOp
         obs[f"m{p.lower()}"] = _assemble(n, [(p, [i], 1.0 / n) for i in range(n)])
         obs[p.lower() * 2] = _assemble(n, [(p + p, [i, j], 1.0 / len(bs)) for i, j in bs])
     return obs
+
+
+def build_site_observables(n: int) -> dict[str, SparsePauliOp]:
+    """Un-averaged observables: one per site and one per pair.
+
+    Keys are ``x_k, y_k, z_k`` for each site k and ``xx_i_j, yy_i_j, zz_i_j``
+    for every pair i < j. Unlike ``build_observables``, nothing is averaged, so
+    the spatial structure a coefficient law like J(|i-j|) leaves in the data is
+    kept. All pairs are included (not just bonds) because long-range models
+    such as ``lr_ising`` couple every pair.
+    """
+    if n < 2:
+        raise ValueError("Need at least 2 qubits.")
+    obs: dict[str, SparsePauliOp] = {}
+    for p in "XYZ":
+        for k in range(n):
+            obs[f"{p.lower()}_{k}"] = _assemble(n, [(p, [k], 1.0)])
+    for p in "XYZ":
+        for i in range(n):
+            for j in range(i + 1, n):
+                obs[f"{p.lower() * 2}_{i}_{j}"] = _assemble(n, [(p + p, [i, j], 1.0)])
+    return obs
