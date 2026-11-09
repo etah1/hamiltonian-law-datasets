@@ -16,51 +16,47 @@ here with Aarav's agreement, and results that use this pipeline should credit hi
 
 ## Status
 
-The code currently does what the upstream repository does: VQE ground states of
-uniform-coupling spin chains (TFIM, XXZ, XY chain), with gate and shot noise, exported
-to CSV. None of the QH-FEX changes below are built yet.
+The time-evolution dataset pipeline works end to end on simulated data. Built in Qiskit
+so it can reuse the upstream gate-noise model.
 
-## What this fork will add
+| Aspect      | Upstream                                  | This fork                                        |
+|-------------|-------------------------------------------|--------------------------------------------------|
+| Data type   | Ground-state energies and observables     | Time-evolved expectation values `⟨O(t)⟩`         |
+| Couplings   | One uniform `J` per chain                 | `lr_ising`: `J0 \|i-j\|^(-α)` on every pair       |
+| Observables | Averaged over sites or nearest neighbours | Per-site and per-pair values                     |
+| Noise       | Gate noise, T1/T2, and shots              | Same gate noise, plus Binomial shot noise        |
+| CSV labels  | Model and parameter names in columns      | Neutral columns; ground truth in a separate file |
 
-The upstream pipeline was built for a different target, so it needs these changes
-before it can feed QH-FEX:
+Still to do: more law-based models (Gaussian beam envelope, site-dependent fields, XXZ
+with a law), and longer held-out times for validation.
 
-| Aspect      | Upstream now                              | What QH-FEX needs                          |
-|-------------|-------------------------------------------|--------------------------------------------|
-| Data type   | Ground-state energies and observables     | Time-evolved expectation values `⟨O(t)⟩`   |
-| Couplings   | One uniform `J` per chain                 | Position-dependent laws such as `J0 \|i-j\|^(-α)` |
-| Observables | Averaged over sites or nearest neighbours | Per-site and per-pair values               |
-| Noise       | Gate noise, T1/T2, and shots              | Shot noise first, gate noise later         |
-| CSV labels  | Model and parameter names in columns      | Neutral column names                       |
+## Making a dataset for AutoSR
 
-Planned work, roughly in order:
-
-1. **Distance-dependent couplings.** Add models to `src/hamiltonian.py` whose couplings
-   follow a law (power law, power law with a Gaussian beam envelope, site-dependent
-   fields), so there is a formula to recover instead of a single constant.
-2. **Per-site and per-pair observables.** Export `⟨Z_k⟩`, `⟨X_k X_{k+1}⟩`, etc. for each
-   site and pair instead of chain averages. Averaging throws away the spatial information
-   AutoSR needs to find something like `J(r)`.
-3. **Time-evolution mode.** Prepare product states (each qubit in one of
-   `|0⟩, |1⟩, |+⟩, |−⟩, |+i⟩, |−i⟩`), evolve them with Trotterized circuits, and record
-   `⟨O_k(t)⟩` at several times. Short times are used for first-order fitting; longer
-   times are held back for validation.
-4. **Neutral data.** The CSV AutoSR sees has no model or parameter names in its columns
-   or filename. The true Hamiltonian is written to a separate JSON file that AutoSR
-   never reads. Each dataset records its random seed so it can be regenerated exactly.
-5. **One framework.** Either port the noise model to PennyLane or move the QH-FEX
-   generator to Qiskit, so both produce the same CSV format.
-
-### Target dataset format
-
-```
-<dataset>.csv     n, setting_id, state, observable, t, value, stderr
-<dataset>.json    true Hamiltonian (operator families + coefficient laws), seed  [hidden from AutoSR]
+```bash
+python scripts/make_dynamics_dataset.py --sizes 4 5 6 --times 0:0.5:6 --states 10     --shots 1000 --p1 0.0001 --p2 0.001 --seed 0 --out data/run1
 ```
 
-Shot noise for a Pauli observable with true expectation `m` and `M` shots:
-`k ~ Binomial(M, (1+m)/2)`, recorded as `m̂ = 2k/M − 1` with standard error
-`sqrt((1 − m̂²)/M)`.
+This writes two files:
+
+```
+data/run1/data.csv     n, setting_id, state, observable, t, value, stderr   <- give to AutoSR
+data/run1/truth.json   model, parameters, noise, Trotter settings, seed     <- never give to AutoSR
+```
+
+- **state**: one letter per qubit, qubit 0 first: `0 1` (Z), `+ -` (X), `r l` (Y, i.e. `|±i⟩`).
+  States are drawn at random so X and Y eigenstates appear; from `|0…0⟩` alone the ZZ
+  couplings are invisible at first order.
+- **observable**: `x_k, y_k, z_k` on every qubit and `xx_i_j, yy_i_j, zz_i_j` on pairs with
+  `|i-j| <= --pair-distance` (default 1, nearest neighbours).
+- **value / stderr**: `k ~ Binomial(M, (1+m)/2)`, `m̂ = 2k/M − 1`, standard error
+  `sqrt((1 − m̂²)/M)` floored at `1/M` so points where every shot agrees aren't given
+  infinite weight.
+- **Trotter**: each time uses `ceil(t/dt)` steps (`--dt`, `--order`); `t = 0` is the
+  prepared state with no evolution gates.
+
+Keep the `--out` folder name neutral (no model or parameter names), since a filename hint
+broke the Ion T4 benchmark. `python scripts/run_dynamics_demo.py` prints exact vs Trotter
+vs noisy `⟨Z_k(t)⟩` side by side as a sanity check.
 
 ### How the existing ground-state data is still used
 
@@ -72,9 +68,9 @@ optimizer error on top of noise, so filter on `vqe_error` and compare against th
 
 ---
 
-## Current pipeline (from upstream)
+## Ground-state pipeline (from upstream)
 
-Everything below describes the code as it exists today.
+Aarav's original VQE pipeline, unchanged apart from accepting `lr_ising`.
 
 ### Models
 
@@ -83,6 +79,7 @@ Everything below describes the code as it exists today.
 | `tfim`     | `-J ΣZZ - h ΣX`                                               | `J`, `h`          |
 | `xxz`      | `J Σ(XX + YY + Δ ZZ) + h ΣZ`                                  | `J`, `delta`, `h` |
 | `xy_chain` | `-Jx ΣXX - Jy ΣYY - h ΣZ` (spin form of the Kitaev chain)    | `Jx`, `Jy`, `h`   |
+| `lr_ising` | `Σ_{i<j} J0 \|i-j\|^(-α) ZZ + h ΣX` (all pairs; use `--ansatz hea`) | `J0`, `alpha`, `h` |
 
 Add a model by writing a builder in `src/hamiltonian.py` and registering it in `MODELS`
 (plus an HVA in `src/ansatz/hva.py`, or just use `--ansatz hea`).
@@ -127,11 +124,14 @@ optimised circuit is then run through the noise model (density-matrix simulation
 ### Layout
 
 ```
-src/hamiltonian.py      models, observables
+src/hamiltonian.py      models, observables (averaged and per-site)
+src/states.py           product-state preparation
+src/evolution.py        Trotter / exact / noisy time evolution
 src/noise.py            NoiseConfig -> Aer NoiseModel
 src/ansatz/             hea.py, hva.py
 src/solvers/            exact_solver.py, vqe_engine.py
-src/dataset/exporter.py grid sweeps -> DataFrame -> CSV
+src/dataset/exporter.py ground-state grid sweeps -> CSV
+src/dataset/dynamics.py time-evolution datasets -> data.csv + truth.json
 scripts/                CLI entry points
 tests/                  pytest suite
 ```
